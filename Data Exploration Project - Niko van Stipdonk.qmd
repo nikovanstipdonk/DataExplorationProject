@@ -1,0 +1,150 @@
+---
+title: "Data Exploration Project"
+format: docx
+editor: visual
+---
+
+## Research Question
+
+Among colleges that predominantly grant bachelor's degrees, did the release of the Scorecard shift student interest to high-earnings colleges relative to low-earnings ones (as proxied by Google searches for keywords associated with those colleges)?
+
+## Libraries
+
+```{r}
+library(rio)
+library(tidyverse)
+library(lubridate)
+library(fixest)
+library(dplyr)
+```
+
+## Importing Data
+
+```{r}
+filelist <- list.files("Lab3_RawData", pattern = 'trends', full.names = TRUE)
+
+my_data <- import_list(filelist, fill = TRUE, rbind = TRUE)
+
+head(my_data)
+```
+
+## Cleaning Data
+
+```{r}
+cleaned_data <- my_data %>% mutate(new_date_variable = ymd(str_sub(monthorweek, start = 0, end = 10)))
+
+head(cleaned_data)
+```
+
+```{r}
+aggregated_data <- cleaned_data %>%
+  group_by(schname, keyword) %>%
+  mutate(standardized_index = (index - mean(index,na.rm = TRUE)) / sd(index, na.rm = TRUE))
+
+head(aggregated_data)
+```
+
+### Reading in Scorecard Data
+
+```{r}
+scorecard <- import('Lab3_RawData\\Most+Recent+Cohorts+(Scorecard+Elements).csv')
+id_name_link <- import('Lab3_RawData\\id_name_link.csv')
+
+colnames(scorecard)
+head(id_name_link)
+```
+
+### Merging in Scorecard Data
+
+```{r}
+id_name_link_count <- id_name_link %>%
+  group_by(schname) %>%
+  mutate(n = n()) %>%
+  filter(n == 1)
+
+combined_data <- inner_join(aggregated_data, id_name_link_count, by = c("schname"= "schname"))
+
+final_data <- inner_join(combined_data, scorecard, by = c("unitid" = "UNITID"))
+
+head(final_data)
+```
+
+### Limiting Data to Those Who Predominately Grant Bachelor's Degrees
+
+```{r}
+filtered_final_data <- final_data %>% 
+  filter(PREDDEG == 3) %>%
+  group_by(schname, unitid, opeid, new_date_variable, `md_earn_wne_p10-REPORTED-EARNINGS`) %>%
+  summarise(index = mean(index, na.rm = TRUE),standardized_index = mean(standardized_index, na.rm = TRUE))
+```
+
+### Mutating Reported Earnings as Numeric
+
+```{r}
+filtered_final_data <- filtered_final_data %>% mutate(reported_earnings = as.numeric(`md_earn_wne_p10-REPORTED-EARNINGS`))
+```
+
+Here I mutated reported earnings to be a numeric value, this will be important for later when I need to differentiate between before and after the introduction of the Scorecard. It also ensures that I will not run into any possible errors in my regressions.
+
+### Filtering Data
+
+```{r}
+mean_earnings <- mean(filtered_final_data$reported_earnings, na.rm = TRUE)
+sd_earnings <- sd(filtered_final_data$reported_earnings, na.rm = TRUE)
+
+```
+
+```{r}
+filtered_final_data <- filtered_final_data %>% mutate(income_level = ifelse(reported_earnings >= mean_earnings + sd_earnings, 'High', 'Low'))
+```
+
+Here I define "high" earning colleges as any college whose reported graduate earnings were greater than or equal to one standard deviation above the mean. Therefore, "low" earning colleges would consist of all colleges with reported graduate earnings below that.
+
+```{r}
+filtered_final_data <- filtered_final_data %>% filter(reported_earnings < 40000 | reported_earnings > 70000)
+```
+
+To ensure that my data contained actual high and low earning colleges as well as clean out the middle area of "average" earning colleges, I set a filter to cut off reported earnings to either below 40,000 or above 70,000. I choose this because the average salary for college graduates is around 50000-55000, however there is variation from state to state. Therefore I thought that 40,000 and 70,000 would be roughly equidistant from the mean salary.
+
+```{r}
+filtered_final_data$month <- lubridate::month(filtered_final_data$new_date_variable)
+
+filtered_final_data <- filtered_final_data %>% mutate(after_scorecard = ifelse(new_date_variable >= as.Date("2015-01-01"), 'After', 'Before'))
+```
+
+To be able to distinguish between before and after the College Scorecard implementation, I created a binary variable that indicates if the data point was measured before or after New Years of 2015, as the College Scorecard was introduced in 2015.
+
+## Creating a Regression
+
+The regression I will be employing is a Difference in Differences regression. This is because I believe that it is the best suited for this situation, as there is a clear before and after as well as two groups that could be considered treated and untreated. It will help us to answer the question of how the implementation of the Scorecard on the high earning graduate colleges.
+
+```{r}
+model <- feols(index ~ after_scorecard*income_level, data = filtered_final_data)
+etable(model)
+```
+
+Firstly I will break down this regression and its coefficients. For High earning graduate colleges, 4.636 is the difference in search activity before and after the implementation of the College Scorecard. After the introduction of the College Scorecard, the difference in search activity between High and Low earning graduate colleges was -4.164. Finally, the coefficient of -0.1607 is how much larger the before and after difference between high and low earning graduate colleges. Therefore, for low earning graduate colleges, the search activity difference before and after the College Scorecard is 0.1607 less than for high earning graduate colleges.
+
+Thus, the introduction of the College Scorecard decreased search activity on Google Trends for colleges with high-earning graduates by 0.1607 search queries relative to what it did for colleges with low-earning graduates, with a standard error of 0.3675. This result comes from the after_scorecard x income_level coefficient in my regression.
+
+## Visualizations
+
+To better compare the effect of the introduction of the College Scorecard, I created two visualizations showing the distribution of search activity for High and Low earning graduates colleges for before and after the implementation.
+
+```{r}
+filtered_final_data_prescorecard <- filtered_final_data %>% filter(after_scorecard == 'Before')
+
+filtered_final_data_postscorecard <- filtered_final_data %>% filter(after_scorecard == 'After')
+```
+
+```{r}
+ggplot(data = filtered_final_data_prescorecard, aes(x = income_level, y = index)) + geom_boxplot() + theme_minimal() + labs(x = "Income Level", y = "Index", title ="Distribution of Search Queries for High and Low Income Level Universities \n Before Scorecard Implementation (Before 2015)") + theme(aspect.ratio=1/1.5) + theme(plot.title = element_text(size=10)) + theme(plot.title = element_text(hjust = 0.5))+ stat_summary(aes(y = index , label = round(..y.., 2)), fun.y = mean, geom = "text", position=position_nudge(y=-4)) + stat_summary(fun.y=mean, geom="point")
+```
+
+```{r}
+ggplot(data = filtered_final_data_postscorecard, aes(x = income_level, y = index)) + geom_boxplot() + theme_minimal() + labs(x = "Income Level", y = "Index", title ="Distribution of Search Queries for High and Low Income Level Universities \n After Scorecard Implementation (After 2015)") + theme(aspect.ratio=1/1.5) + theme(plot.title = element_text(size=10)) + theme(plot.title = element_text(hjust = 0.5)) + stat_summary(aes(y = index , label = round(..y.., 2)), fun.y = mean, geom = "text", position=position_nudge(y=-4)) + stat_summary(fun.y=mean, geom="point")
+```
+
+What is interesting between these two visualizations is that from Before and After the implementation of the College Scorecard, search activity decreased across the board. In addition, what we can observe is that the difference in search activity between high and low income levels is lower after the introduction of the College Scorecard. Within the box and whisker plots, I have displayed the means with a point as well as a corresponding value. When taking the difference between the difference of high and low before and after the introduction of the College Scorecard, we find that the gap in search activity decreased by roughly 0.17. This corroborates my earlier findings through my regression, as the two plots demonstrate how the relative indexes decreased after the 2015 introduction of the College Scorecard, as well as how the gap in search activity between High and Low earning graduate colleges decreased after the change. It is important to note that generally, search activity seems to have been decreasing over the course of the data set.
+
+Therefore, according to my regression and visualizations, the introduction of the College Scorecard decreased search activity for colleges with high-earning graduates and low-earning graduates alike. A possible explanation for this is that with the introduction of this resource, prospective students began to using the College Scorecard as a substitute for looking up key information on individual schools. Since the College Scorecard provides a centralized place for individuals to find information on colleges, many may not have the need to go outside of the website and continue their research.
